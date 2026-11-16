@@ -1,115 +1,105 @@
 # HairyGraph
 
-**HairyGraph** is a lightweight, local hierarchical graph memory service built with **FastAPI** and **SQLite**. It runs entirely locally at `http://127.0.0.1:8000` with **no external AI/LLM services**, API keys, or runtime network calls.
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+[![Tests](https://img.shields.io/github/actions/workflow/status/<owner>/<repo>/tests.yml?branch=main&label=tests)](https://github.com/<owner>/<repo>/actions/workflows/tests.yml)
 
-All clustering, semantic matching, and graph traversals are powered by pure Python and `scikit-learn` using TF-IDF and cosine similarity in a shared vector space. HairyGraph is a **retrieval-only** service: it stores, organizes, links, and returns text context without generating text.
+HairyGraph is a lightweight, local-first hierarchical graph memory service built with FastAPI and SQLite. It provides persistent semantic retrieval for AI agents and LLM applications at `http://127.0.0.1:8000` with zero external AI/LLM API calls and zero cloud dependencies at runtime.
 
----
+All clustering, lexical extraction, and graph traversals execute locally using Python and scikit-learn (TF-IDF + cosine similarity). HairyGraph is a retrieval-only service: it stores, indexes, associates, and returns context within strict token budgets without generating text.
 
-## Architecture Overview
-
-```text
-               +--------------------------------------+
-               |          Query (/get_context)        |
-               +-------------------+------------------+
-                                   |
-                  Active Bubbles >= 10?
-                 /                     \
-             [YES]                     [NO]
-               |                         |
-       +-------v-------+         +-------v-------+
-       | TF-IDF Scoring|         |   Cold Start  |
-       |  Top Clusters |         | Sliding Window|
-       +-------+-------+         |   (max 5)     |
-               |                 +-------+-------+
-       +-------v-------+                 |
-       | Seed Selection|                 |
-       |  Top Bubbles  |                 |
-       +-------+-------+                 |
-               |                         |
-       +-------v-------+                 |
-       |  Undirected   |                 |
-       |  BFS Traversal|                 |
-       |  (Depth <= 2) |                 |
-       +-------+-------+                 |
-               |                         |
-       +-------v-------+                 |
-       | CORE Priority |                 |
-       | Token Budget  |                 |
-       +-------+-------+                 |
-               |                         |
-               +-----------+-------------+
-                           |
-               +-----------v-----------+
-               |  Context History Text |
-               +-----------------------+
-```
-
-### Core Memory Hierarchy
-1. **Clusters**: Top-level semantic buckets representing broad topics (e.g. Astronomy, Cooking, Kubernetes).
-2. **Bubbles**: Nodes within clusters storing extracted keywords, an extractive 2-sentence summary, node type (`CORE` vs `STATE`), and active/archived status.
-3. **Context Clouds**: 1:1 text storage for bubbles containing the exact `User:` prompt and `Assistant:` response.
-4. **Bubble Links**: Weighted graph edges ($0.0 \le \text{weight} \le 1.0$) connecting bubbles across or within clusters.
-
-### Key Retrieval Modes
-- **Cold Start (Day 1 Mode)**: When the active bubble count is $< 10$, graph traversal is skipped. Context is formed from up to 5 most recent active clouds, budgeted newest-first and delivered oldest $\rightarrow$ newest.
-  > **Note**: Archiving can drop the active bubble count below 10 and flip HairyGraph back to cold start. This behavior is intentional.
-- **Hierarchical Graph Retrieval**: When active bubbles $\ge 10$, queries route through coarse cluster scoring, identify seed bubbles, traverse undirected links (up to depth 2, weight $\ge 0.35$), sort traversed nodes giving priority to `CORE` nodes, and pack context strictly within `max_tokens`.
-
-### Ingestion & Graph Dynamics
-- **Deterministic Keywords**: Extracted using stop-word-filtered term frequency, tie-broken by IDF and alphabetically.
-- **Link Rule**: Cosine similarity in $[0.35, 0.80]$ creates an undirected edge and increments `incoming_links` on older bubbles.
-- **Supersede Rule**: Cosine similarity $> 0.80$ against an older `STATE` bubble marks it as `archived`.
-- **CORE Protection**: A `CORE` bubble is **never** archived by duplicate or high-similarity memories; edges are linked and knowledge remains intact.
-- **Auto-Promotion**: Any active `STATE` bubble that accumulates $\ge 5$ incoming links is automatically promoted to `CORE`.
+For detailed technical specifications, internal pipelines, and trade-off analyses, refer to the [System Architecture Documentation](docs/ARCHITECTURE.md). For an integration walkthrough showing pre-inference context retrieval and post-inference ingestion, see the [Local Agent Client Example](examples/local_agent_demo.py). For setup instructions and contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## Installation & Setup
+## Quick Start
 
-### Prerequisites
-- Python 3.10+
-
-### Setup Virtual Environment
 ```bash
-cd hairy_graph
+# 1. Clone
+git clone https://github.com/<owner>/<repo>.git && cd <repo>
+
+# 2. Create and activate a virtual environment
 python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-# On Linux/macOS:
-source .venv/bin/activate
+# 3. Install
+pip install -e .
 
-# On Windows PowerShell:
-.\.venv\Scripts\Activate.ps1
-```
-
-### Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### Run the Server
-```bash
+# 4. Run
 uvicorn hairy_graph.main:app --host 127.0.0.1 --port 8000
 ```
 
-The database defaults to `hairy_graph.db`. To change the database location:
+To configure a custom database path:
 ```bash
-export MEMORY_DB_PATH="/custom/path/memory.db"
+export MEMORY_DB_PATH="/path/to/custom_memory.db"
 # Windows PowerShell:
-$env:MEMORY_DB_PATH = "C:\custom\path\memory.db"
+$env:MEMORY_DB_PATH = "C:\path\to\custom_memory.db"
 ```
+
+---
+
+## Directory Structure
+
+```text
+├── .github/
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.md
+│   │   └── feature_request.md
+│   ├── PULL_REQUEST_TEMPLATE.md
+│   └── workflows/
+│       └── tests.yml
+├── docs/
+│   └── ARCHITECTURE.md
+├── examples/
+│   └── local_agent_demo.py
+├── hairy_graph/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── database.py
+│   ├── graph_engine.py
+│   └── main.py
+├── tests/
+│   └── test_memory.py
+├── .env.example
+├── .gitignore
+├── CONTRIBUTING.md
+├── LICENSE
+├── pyproject.toml
+├── README.md
+└── requirements.txt
+```
+
+---
+
+## Core Memory Model
+
+1. **Clusters**: Top-level thematic groups representing broad knowledge domains.
+2. **Bubbles**: Semantic nodes within clusters storing extracted keywords, an extractive 2-sentence summary, node type (`CORE` vs `STATE`), and status (`active` vs `archived`).
+3. **Context Clouds**: Exact 1:1 text storage for bubbles containing the raw prompt and response pair.
+4. **Bubble Links**: Weighted graph edges ($0.0 \le \text{weight} \le 1.0$) connecting semantically related bubbles across or within clusters.
+
+### Operational Modes
+- **Cold Start Mode (< 10 active bubbles)**: Graph traversal is skipped. Context is populated from the 5 most recent active context clouds, budgeted newest-first, and delivered in chronological order (oldest to newest).
+- **Hierarchical Graph Mode (>= 10 active bubbles)**: Queries route through top 2 matching clusters, identify seed bubbles, traverse undirected links up to depth 2 (weight $\ge 0.35$), sort traversed nodes giving priority to `CORE` nodes, and pack context strictly within `max_tokens`.
+- **Active Archiving**: Archiving nodes via superseding or `/archive_last` can reduce the active count below 10, returning HairyGraph to cold start mode.
+
+### Lifecycle Rules
+- **Link Rule**: Cosine similarity in $[0.35, 0.80]$ creates an undirected edge and increments `incoming_links` on older bubbles.
+- **Supersede Rule**: Cosine similarity $> 0.80$ against an older `STATE` bubble marks it as `archived`.
+- **CORE Protection**: A `CORE` bubble is never archived by duplicate or high-similarity memories; edges are linked and knowledge remains intact.
+- **Auto-Promotion**: Any active `STATE` bubble accumulating $\ge 5$ incoming links transitions to `CORE`.
 
 ---
 
 ## API Reference
 
-### 1. `POST /get_context`
+### `POST /get_context`
 Retrieve relevant memory context formatted as clean chat history within a strict token budget.
 
 **Request:**
 ```json
 {
-  "query": "quantum entanglement and qubits",
+  "query": "quantum computing and qubit superposition",
   "max_tokens": 1500
 }
 ```
@@ -118,13 +108,13 @@ Retrieve relevant memory context formatted as clean chat history within a strict
 ```json
 {
   "mode": "graph",
-  "context": "User: What is quantum entanglement?\nAssistant: Entanglement links two particles instantaneously regardless of distance.\n\nUser: Explain qubits.\nAssistant: Qubits exploit superposition to represent multiple states simultaneously.",
-  "tokens_used": 34,
+  "context": "User: Explain qubits.\nAssistant: Superposition allows qubits to represent multiple states simultaneously.",
+  "tokens_used": 22,
   "debug_trace": [
     {
       "type": "cluster",
-      "id": "c71a34...",
-      "cluster_id": "c71a34...",
+      "id": "c-101",
+      "cluster_id": "c-101",
       "similarity": 0.6521,
       "node_type": null,
       "depth": 0,
@@ -132,8 +122,8 @@ Retrieve relevant memory context formatted as clean chat history within a strict
     },
     {
       "type": "bubble",
-      "id": "b901fc...",
-      "cluster_id": "c71a34...",
+      "id": "b-202",
+      "cluster_id": "c-101",
       "similarity": 0.7812,
       "node_type": "CORE",
       "depth": 0,
@@ -143,107 +133,76 @@ Retrieve relevant memory context formatted as clean chat history within a strict
 }
 ```
 
-### 2. `POST /save_memory`
+### `POST /save_memory`
 Store a prompt and response pair into the hierarchical memory graph.
 
 **Request:**
 ```json
 {
-  "prompt": "How do you calculate sourdough hydration?",
-  "response": "Hydration is the total water weight divided by flour weight expressed as a percentage.",
-  "pin_as_core": false
+  "prompt": "Our database must use SQLite with WAL mode enabled.",
+  "response": "Understood. SQLite configured with WAL mode and foreign keys enabled.",
+  "pin_as_core": true
 }
 ```
 
 **Response:**
 ```json
 {
-  "bubble_id": "e4a2bc01-...",
-  "cluster_id": "f5b3cd12-...",
-  "node_type": "STATE",
+  "bubble_id": "8f1a4e2b-...",
+  "cluster_id": "3c9d7e1a-...",
+  "node_type": "CORE",
   "archived_node_ids": [],
   "promoted_node_ids": []
 }
 ```
 
-### 3. `POST /archive_last`
-Archive the single most recently created active `STATE` bubble (CORE bubbles are never touched).
+### `POST /archive_last`
+Archive the single most recently created active `STATE` bubble (`CORE` bubbles are never modified).
 
 **Response:**
 ```json
 {
-  "archived_bubble_id": "e4a2bc01-...",
+  "archived_bubble_id": "8f1a4e2b-...",
   "message": "Successfully archived most recent active STATE bubble."
 }
 ```
 
-### 4. `GET /graph_stats`
-Get current counts of clusters, active core nodes, active state nodes, and archived bubbles.
+### `GET /graph_stats`
+Retrieve current counts of clusters, active core nodes, active state nodes, and archived bubbles.
 
 **Response:**
 ```json
 {
-  "total_clusters": 3,
-  "active_core": 2,
-  "active_state": 11,
-  "archived_bubbles": 1
+  "total_clusters": 4,
+  "active_core": 3,
+  "active_state": 12,
+  "archived_bubbles": 2
 }
 ```
 
-### 5. `GET /health`
-Public health check endpoint.
-
-**Response:**
-```json
-{
-  "status": "ok"
-}
-```
+### `GET /health`
+Public health check endpoint. Always returns `{"status": "ok"}`.
 
 ---
 
-## Security & Cloudflare Quick Tunnel Guide
+## Security & Tunneling Notice
 
-### Security Defaults
-- The server binds strictly to `127.0.0.1` by default.
-- Prompts and responses are never logged in plaintext.
-- **Optional Authentication**: If the environment variable `MEMORY_API_KEY` is set, all endpoints except `/health` require the `X-API-Key` request header (verified with constant-time `secrets.compare_digest`).
+- **Host Binding**: Uvicorn binds to `127.0.0.1` by default.
+- **Privacy**: Prompts and responses are never logged to console or stdout.
+- **Authentication**: When `MEMORY_API_KEY` is configured, all endpoints except `/health` require an `X-API-Key` request header matching the configured key (evaluated via constant-time comparison).
 
-### Cloudflare Quick Tunnel Setup & Security Warning
+### Cloudflare Quick Tunnel Warning
 
-> [!WARNING]
-> **CRITICAL SECURITY ADVISORY**
-> Exposing port 8000 to the public internet using a Cloudflare Quick Tunnel (`cloudflared tunnel --url http://localhost:8000`) assigns an unauthenticated public HTTPS URL to your service.
-> Because HairyGraph enables CORS (`allow_origins=["*"]`), **anyone with this URL can read and modify your memory store without restriction**.
->
-> **ALWAYS set `MEMORY_API_KEY` before opening a public tunnel:**
-> ```bash
-> export MEMORY_API_KEY="your-strong-random-secret"
-> # Windows PowerShell:
-> $env:MEMORY_API_KEY = "your-strong-random-secret"
-> ```
-
-To expose HairyGraph securely via Cloudflare Quick Tunnel:
-1. Set `MEMORY_API_KEY`:
-   ```bash
-   export MEMORY_API_KEY="my-secure-api-key"
-   ```
-2. Start HairyGraph:
-   ```bash
-   uvicorn hairy_graph.main:app --host 127.0.0.1 --port 8000
-   ```
-3. In a separate terminal, launch the tunnel:
-   ```bash
-   cloudflared tunnel --url http://127.0.0.1:8000
-   ```
-4. Configure clients with the `X-API-Key` header matching your secret key.
+Exposing port 8000 using Cloudflare Quick Tunnel (`cloudflared tunnel --url http://127.0.0.1:8000`) creates an unauthenticated public HTTPS URL. Because CORS is permissive (`allow_origins=["*"]`), anyone who discovers the tunnel URL can read or modify your memory store. Always define `MEMORY_API_KEY` before opening a public tunnel.
 
 ---
 
-## Running Tests
+## Verification & Testing
 
-Run the complete test suite:
+Execute the test suite from the repository root:
+
 ```bash
-pytest hairy_graph/test_memory.py -v
+pytest -v
 ```
-All tests use temporary SQLite databases isolated per test function without mutating real data.
+
+All tests execute against temporary SQLite instances and verify cold start behavior, graph transitions, semantic routing, cross-cluster bridging, strict token capping, supersede mechanics, auto-promotion, and API authentication.
