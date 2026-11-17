@@ -11,7 +11,8 @@ license = {text = "MIT"}
 dependencies = [
     "fastapi",
     "uvicorn",
-    "scikit-learn",
+    "fastembed",
+    "numpy",
     "pydantic",
     "httpx",
 ]

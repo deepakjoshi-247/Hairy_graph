@@ -12,17 +12,17 @@ def get_db_path() -> str:
 COLD_START_THRESHOLD: int = 10
 COLD_START_RECENT_LIMIT: int = 5
 
-# Hierarchical Graph Retrieval settings
+# Hierarchical Graph Retrieval settings (calibrated for BAAI/bge-small-en-v1.5 embeddings)
 GRAPH_TOP_CLUSTERS: int = 2
 GRAPH_SEEDS_PER_CLUSTER: int = 2
 GRAPH_TRAVERSAL_MAX_DEPTH: int = 2
-GRAPH_EDGE_MIN_WEIGHT: float = 0.35
+GRAPH_EDGE_MIN_WEIGHT: float = 0.65  # Minimum edge weight to traverse in graph mode
 
-# Ingestion, Linking, Superseding & Promotion
-CLUSTER_ATTACH_THRESHOLD: float = 0.25
-LINK_SIMILARITY_MIN: float = 0.35
-LINK_SIMILARITY_MAX: float = 0.80
-SUPERSEDE_THRESHOLD: float = 0.80
+# Ingestion, Linking, Superseding & Promotion (calibrated for BAAI/bge-small-en-v1.5 embeddings)
+CLUSTER_ATTACH_THRESHOLD: float = 0.60  # Minimum cosine similarity to attach to an existing cluster
+LINK_SIMILARITY_MIN: float = 0.65  # Minimum cosine similarity to form an associative link edge
+LINK_SIMILARITY_MAX: float = 0.88  # Upper bound of associative linking before supersede evaluation
+SUPERSEDE_THRESHOLD: float = 0.88  # Cosine similarity above which older STATE bubbles are superseded
 PROMOTION_INCOMING_LINKS: int = 5
 
 # Token & Text constraints

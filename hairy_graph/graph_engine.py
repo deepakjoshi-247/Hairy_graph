@@ -1,11 +1,12 @@
 import math
 import re
+import threading
 import uuid
 from collections import Counter, deque
 from typing import Any, Dict, List, Optional, Tuple
 
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from fastembed import TextEmbedding
+import numpy as np
 
 from hairy_graph import config
 from hairy_graph.database import (
@@ -31,6 +32,89 @@ from hairy_graph.database import (
     set_bubble_status,
     update_cluster_summary,
 )
+
+# Standard English stop words for lightweight human-readable keyword extraction
+ENGLISH_STOP_WORDS = frozenset(
+    [
+        "a", "about", "above", "across", "after", "afterwards", "again", "against", "all",
+        "almost", "alone", "along", "already", "also", "although", "always", "am", "among",
+        "amongst", "amoungst", "amount", "an", "and", "another", "any", "anyhow", "anyone",
+        "anything", "anyway", "anywhere", "are", "around", "as", "at", "back", "be",
+        "became", "because", "become", "becomes", "becoming", "been", "before", "beforehand",
+        "behind", "being", "below", "beside", "besides", "between", "beyond", "bill", "both",
+        "bottom", "but", "by", "call", "can", "cannot", "cant", "co", "con", "could",
+        "couldnt", "cry", "de", "describe", "detail", "do", "done", "down", "due", "during",
+        "each", "eg", "eight", "either", "eleven", "else", "elsewhere", "empty", "enough",
+        "etc", "even", "ever", "every", "everyone", "everything", "everywhere", "except", "few",
+        "fifteen", "fifty", "fill", "find", "fire", "first", "five", "for", "former",
+        "formerly", "forty", "found", "four", "from", "front", "full", "further", "get",
+        "give", "go", "had", "has", "hasnt", "have", "he", "hence", "her", "here",
+        "hereafter", "hereby", "herein", "hereupon", "hers", "herself", "him", "himself", "his",
+        "how", "however", "hundred", "i", "ie", "if", "in", "inc", "indeed", "interest",
+        "into", "is", "it", "its", "itself", "keep", "last", "latter", "latterly", "least",
+        "less", "ltd", "made", "many", "may", "me", "meanwhile", "might", "mill", "mine",
+        "more", "moreover", "most", "mostly", "move", "much", "must", "my", "myself", "name",
+        "namely", "neither", "never", "nevertheless", "next", "nine", "no", "nobody", "none",
+        "noone", "nor", "not", "nothing", "now", "nowhere", "of", "off", "often", "on",
+        "once", "one", "only", "onto", "or", "other", "others", "otherwise", "our", "ours",
+        "ourselves", "out", "over", "own", "part", "per", "perhaps", "please", "put",
+        "rather", "re", "same", "see", "seem", "seemed", "seeming", "seems", "serious",
+        "several", "she", "should", "show", "side", "since", "sincere", "six", "sixty", "so",
+        "some", "somehow", "someone", "something", "sometime", "sometimes", "somewhere", "still",
+        "such", "system", "take", "ten", "than", "that", "the", "their", "them", "themselves",
+        "then", "thence", "there", "thereafter", "thereby", "therefore", "therein", "thereupon",
+        "these", "they", "thick", "thin", "third", "this", "those", "though", "three",
+        "through", "throughout", "thru", "thus", "to", "together", "too", "top", "toward",
+        "towards", "twelve", "twenty", "two", "un", "under", "until", "up", "upon", "us",
+        "very", "via", "was", "we", "well", "were", "what", "whatever", "when", "whence",
+        "whenever", "where", "whereafter", "whereas", "whereby", "wherein", "whereupon",
+        "wherever", "whether", "which", "while", "whither", "who", "whoever", "whole", "whom",
+        "whose", "why", "will", "with", "within", "without", "would", "yet", "you", "your",
+        "yours", "yourself", "yourselves",
+    ]
+)
+
+# Lazy singleton model management
+_model: Optional[TextEmbedding] = None
+_model_lock = threading.Lock()
+
+
+def _get_model() -> TextEmbedding:
+    """Lazy singleton accessor for TextEmbedding('BAAI/bge-small-en-v1.5').
+
+    Thread-safe and initialized on first use to ensure fast, offline-safe module imports.
+    """
+    global _model
+    if _model is None:
+        with _model_lock:
+            if _model is None:
+                _model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+    return _model
+
+
+def embed_texts(texts: List[str]) -> np.ndarray:
+    """Embed a list of strings into L2-normalized float32 vectors of shape (len(texts), 384).
+
+    Returns shape (0, 384) for an empty list without invoking the model.
+    """
+    if not texts:
+        return np.empty((0, 384), dtype=np.float32)
+
+    model = _get_model()
+    raw_embeddings = list(model.embed(texts))
+    arr = np.array(raw_embeddings, dtype=np.float32)
+
+    # L2-normalize each row with safe zero-norm handling
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    safe_norms = np.maximum(norms, 1e-12)
+    normalized = arr / safe_norms
+    return np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def compute_similarity(text_a: str, text_b: str) -> float:
+    """Compute cosine similarity between two texts using normalized bge-small embeddings."""
+    embs = embed_texts([text_a, text_b])
+    return float(np.dot(embs[0], embs[1]))
 
 
 def estimate_tokens(text: str) -> int:
@@ -63,12 +147,11 @@ def extract_extractive_summary(prompt: str, response: str) -> str:
 
 
 def extract_keywords(text: str, existing_corpus: List[str], count: int = config.KEYWORD_COUNT) -> List[str]:
-    """
-    Extract top keywords from prompt + response:
+    """Extract top keywords from prompt + response:
+
     Stop-word-filtered term frequency, breaking ties by IDF, then alphabetically.
-    Deterministic even on empty corpus.
+    Used purely for human-readable cluster names and metadata.
     """
-    # Tokenize words >= 2 chars, lowercase alphanumeric + underscore
     tokens = [w.lower() for w in re.findall(r"\b[a-zA-Z0-9_]{2,}\b", text)]
     filtered_tokens = [w for w in tokens if w not in ENGLISH_STOP_WORDS]
     if not filtered_tokens:
@@ -98,39 +181,6 @@ def extract_keywords(text: str, existing_corpus: List[str], count: int = config.
 
     candidate_items.sort()
     return [item[2] for item in candidate_items[:count]]
-
-
-def fit_shared_vectorizer(corpus: List[str]) -> Optional[TfidfVectorizer]:
-    """
-    Fit TfidfVectorizer(stop_words='english') once over the corpus.
-    Gracefully returns None if corpus has empty vocabulary or only stop words.
-    """
-    if not corpus:
-        return None
-    try:
-        vec = TfidfVectorizer(stop_words="english")
-        vec.fit(corpus)
-        if not hasattr(vec, "vocabulary_") or not vec.vocabulary_:
-            return None
-        return vec
-    except ValueError:
-        # Handles empty vocabulary or all-stop-words corpus
-        return None
-
-
-def compute_similarity(vec: Optional[TfidfVectorizer], text_a: str, text_b: str) -> float:
-    """Compute cosine similarity between two texts using a shared fitted vectorizer."""
-    if vec is None:
-        return 0.0
-    try:
-        va = vec.transform([text_a])
-        vb = vec.transform([text_b])
-        if va.nnz == 0 or vb.nnz == 0:
-            return 0.0
-        sim = cosine_similarity(va, vb)[0, 0]
-        return float(sim)
-    except Exception:
-        return 0.0
 
 
 def format_cloud_context(raw_prompt: str, raw_response: str) -> str:
@@ -192,19 +242,23 @@ def retrieve_context(conn, query: str, max_tokens: int = config.DEFAULT_MAX_TOKE
 
     # Hierarchical Graph Retrieval Mode (active bubbles >= 10)
     active_bubbles = get_all_active_bubbles(conn)
-    bubble_corpus = [get_bubble_search_text(b) for b in active_bubbles]
-
-    # Fit vectorizer ONCE over active bubble texts
-    vec = fit_shared_vectorizer(bubble_corpus)
+    query_emb = embed_texts([query])[0]
 
     # 1. Score query against clusters and select top 2
     clusters = get_all_clusters(conn)
     cluster_scores: List[Tuple[float, ClusterRecord, List[BubbleRecord]]] = []
-    for c in clusters:
-        members = [b for b in active_bubbles if b.cluster_id == c.id]
-        c_text = get_cluster_search_text(c, members)
-        sim = compute_similarity(vec, query, c_text)
-        cluster_scores.append((sim, c, members))
+
+    if clusters:
+        cluster_data = [
+            (c, [b for b in active_bubbles if b.cluster_id == c.id])
+            for c in clusters
+        ]
+        cluster_texts = [get_cluster_search_text(c, members) for c, members in cluster_data]
+        cluster_embs = embed_texts(cluster_texts)
+        sims = cluster_embs @ query_emb
+
+        for idx, (c, members) in enumerate(cluster_data):
+            cluster_scores.append((float(sims[idx]), c, members))
 
     # Sort clusters by similarity descending
     cluster_scores.sort(key=lambda x: x[0], reverse=True)
@@ -229,10 +283,13 @@ def retrieve_context(conn, query: str, max_tokens: int = config.DEFAULT_MAX_TOKE
     candidate_bubbles = [b for b in active_bubbles if b.cluster_id in top_cluster_ids]
 
     bubble_scores: List[Tuple[float, BubbleRecord]] = []
-    for b in candidate_bubbles:
-        b_text = get_bubble_search_text(b)
-        sim = compute_similarity(vec, query, b_text)
-        bubble_scores.append((sim, b))
+    if candidate_bubbles:
+        candidate_texts = [get_bubble_search_text(b) for b in candidate_bubbles]
+        candidate_embs = embed_texts(candidate_texts)
+        b_sims = candidate_embs @ query_emb
+
+        for idx, b in enumerate(candidate_bubbles):
+            bubble_scores.append((float(b_sims[idx]), b))
 
     bubble_scores.sort(key=lambda x: x[0], reverse=True)
 
@@ -243,7 +300,7 @@ def retrieve_context(conn, query: str, max_tokens: int = config.DEFAULT_MAX_TOKE
     else:
         seeds = [b for _, b in bubble_scores[: config.GRAPH_SEEDS_PER_CLUSTER]]
 
-    # 3. Traverse bubble_links as undirected graph up to max_depth = 2, weight >= 0.35
+    # 3. Traverse bubble_links as undirected graph up to max_depth = 2, weight >= GRAPH_EDGE_MIN_WEIGHT
     visited: Dict[str, Dict[str, Any]] = {}
     visit_order: List[str] = []
     queue: deque[Tuple[str, int]] = deque([(s.id, 0) for s in seeds])
@@ -257,12 +314,10 @@ def retrieve_context(conn, query: str, max_tokens: int = config.DEFAULT_MAX_TOKE
         if not curr_bubble or curr_bubble.status != "active":
             continue
 
-        b_text = get_bubble_search_text(curr_bubble)
-        sim = compute_similarity(vec, query, b_text)
         visited[curr_id] = {
             "bubble": curr_bubble,
             "depth": depth,
-            "similarity": sim,
+            "similarity": 0.0,
         }
         visit_order.append(curr_id)
 
@@ -271,6 +326,14 @@ def retrieve_context(conn, query: str, max_tokens: int = config.DEFAULT_MAX_TOKE
             for nbr_id in neighbors:
                 if nbr_id not in visited:
                     queue.append((nbr_id, depth + 1))
+
+    # Batch compute similarity for all traversed bubbles
+    if visit_order:
+        traversed_texts = [get_bubble_search_text(visited[bid]["bubble"]) for bid in visit_order]
+        traversed_embs = embed_texts(traversed_texts)
+        traversed_sims = traversed_embs @ query_emb
+        for idx, bid in enumerate(visit_order):
+            visited[bid]["similarity"] = float(traversed_sims[idx])
 
     # 4. Order visited bubbles: CORE first, then STATE; within group by similarity descending
     traversed_items = list(visited.values())
@@ -346,21 +409,25 @@ def save_memory(conn, prompt: str, response: str, pin_as_core: bool = False) -> 
         summary = extract_extractive_summary(prompt, response)
         new_bubble_text = f"{summary} {' '.join(keywords)}".strip()
 
-        # 2. Fit shared vectorizer on active bubbles + new bubble
-        vec = fit_shared_vectorizer(active_corpus + [new_bubble_text])
+        # 2. Embed new bubble text once
+        new_bubble_emb = embed_texts([new_bubble_text])[0]
 
-        # 3. Find matching cluster in shared TF-IDF space
+        # 3. Find matching cluster in shared embedding space
         clusters = get_all_clusters(conn)
         best_cluster: Optional[ClusterRecord] = None
         best_sim = -1.0
 
-        for c in clusters:
-            members = [b for b in active_bubbles if b.cluster_id == c.id]
-            c_text = get_cluster_search_text(c, members)
-            sim = compute_similarity(vec, new_bubble_text, c_text)
-            if sim > best_sim:
-                best_sim = sim
-                best_cluster = c
+        if clusters:
+            cluster_texts = [
+                get_cluster_search_text(c, [b for b in active_bubbles if b.cluster_id == c.id])
+                for c in clusters
+            ]
+            cluster_embs = embed_texts(cluster_texts)
+            cluster_sims = cluster_embs @ new_bubble_emb
+
+            best_idx = int(np.argmax(cluster_sims))
+            best_sim = float(cluster_sims[best_idx])
+            best_cluster = clusters[best_idx]
 
         if best_sim >= config.CLUSTER_ATTACH_THRESHOLD and best_cluster is not None:
             cluster_id = best_cluster.id
@@ -402,26 +469,30 @@ def save_memory(conn, prompt: str, response: str, pin_as_core: bool = False) -> 
             token_estimate=token_estimate,
         )
 
-        # 5. Compare new bubble to every other active bubble using single fit
+        # 5. Compare new bubble to every other active bubble using a single batch embedding call
         archived_node_ids: List[str] = []
 
-        for older in active_bubbles:
-            older_text = get_bubble_search_text(older)
-            sim = compute_similarity(vec, new_bubble_text, older_text)
+        if active_bubbles:
+            older_texts = [get_bubble_search_text(b) for b in active_bubbles]
+            older_embs = embed_texts(older_texts)
+            sims = older_embs @ new_bubble_emb
 
-            if sim > config.SUPERSEDE_THRESHOLD:
-                if older.node_type == "STATE":
-                    # Supersede rule: set older STATE bubble to archived
-                    set_bubble_status(conn, older.id, "archived")
-                    archived_node_ids.append(older.id)
-                else:
-                    # Never archive CORE: create edge and increment incoming_links
+            for idx, older in enumerate(active_bubbles):
+                sim = float(sims[idx])
+
+                if sim > config.SUPERSEDE_THRESHOLD:
+                    if older.node_type == "STATE":
+                        # Supersede rule: set older STATE bubble to archived
+                        set_bubble_status(conn, older.id, "archived")
+                        archived_node_ids.append(older.id)
+                    else:
+                        # Never archive CORE: create edge and increment incoming_links
+                        insert_bubble_link(conn, bubble_id, older.id, sim)
+                        increment_incoming_links(conn, older.id)
+                elif sim >= config.LINK_SIMILARITY_MIN:
+                    # Link rule: insert edge (source = new, target = older) and increment incoming_links
                     insert_bubble_link(conn, bubble_id, older.id, sim)
                     increment_incoming_links(conn, older.id)
-            elif sim >= config.LINK_SIMILARITY_MIN:
-                # Link rule: insert edge (source = new, target = older) and increment incoming_links
-                insert_bubble_link(conn, bubble_id, older.id, sim)
-                increment_incoming_links(conn, older.id)
 
         # 6. Promotion rule: active STATE bubbles with incoming_links >= 5 become CORE
         promoted_node_ids: List[str] = []

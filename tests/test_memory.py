@@ -4,6 +4,7 @@ from pathlib import Path
 # Ensure repository root is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -15,11 +16,12 @@ from hairy_graph.database import (
     insert_bubble_link,
 )
 from hairy_graph.graph_engine import (
+    _get_model,
     compute_similarity,
+    embed_texts,
     estimate_tokens,
     extract_extractive_summary,
     extract_keywords,
-    fit_shared_vectorizer,
     get_bubble_search_text,
 )
 from hairy_graph.main import app
@@ -154,16 +156,12 @@ def test_graph_routing_and_debug_trace(temp_db):
             res = client.post("/save_memory", json={"prompt": p, "response": r})
             assert res.status_code == 200
 
-        # Precondition check using the engine's vectorizer
-        all_texts = [p + " " + r for p, r in physics_texts + baking_texts]
-        vec = fit_shared_vectorizer(all_texts)
-        assert vec is not None
-
+        # Precondition check using neural embeddings
         query_physics = "quantum entanglement qubit photon"
-        phys_sim = compute_similarity(vec, query_physics, physics_texts[0][0] + " " + physics_texts[0][1])
-        bake_sim = compute_similarity(vec, query_physics, baking_texts[0][0] + " " + baking_texts[0][1])
+        phys_sim = compute_similarity(query_physics, physics_texts[0][0] + " " + physics_texts[0][1])
+        bake_sim = compute_similarity(query_physics, baking_texts[0][0] + " " + baking_texts[0][1])
         # Assert fixture precondition: physics similarity is substantially higher than baking
-        assert phys_sim > 0.30
+        assert phys_sim > 0.60
         assert phys_sim > bake_sim
 
         # Run query targeting quantum physics
@@ -228,7 +226,7 @@ def test_cross_cluster_bridging(temp_db):
         # Link astronomy_ids[0] and botany_ids[0] with a bridging edge in a committed transaction
         conn = get_connection()
         with conn:
-            insert_bubble_link(conn, astronomy_ids[0], botany_ids[0], weight=0.50)
+            insert_bubble_link(conn, astronomy_ids[0], botany_ids[0], weight=0.75)
         conn.close()
 
         # Query Astronomy; the bridging edge should pull in botany_ids[0] during graph traversal
@@ -288,18 +286,18 @@ def test_auto_promotion_and_core_protection(temp_db):
         s1_id = res1.json()["bubble_id"]
         assert res1.json()["node_type"] == "STATE"
 
-        # 5 subsequent bubbles designed to have 0.35 <= similarity <= 0.80 with S1
+        # 5 subsequent bubbles designed to have 0.65 <= similarity <= 0.88 with S1
         related_bubbles = [
-            ("robotics kinematic arm actuator servo control", "Robotics kinematic arm actuator servo control calibrates joint angles step alpha."),
-            ("robotics kinematic arm actuator servo control", "Robotics kinematic arm actuator servo control monitors joint angles step beta."),
-            ("robotics kinematic arm actuator servo control", "Robotics kinematic arm actuator servo control balances joint angles step gamma."),
-            ("robotics kinematic arm actuator servo control", "Robotics kinematic arm actuator servo control streams joint angles step delta."),
-            ("robotics kinematic arm actuator servo control", "Robotics kinematic arm actuator servo control models joint angles step epsilon."),
+            ("industrial robotic arm inverse kinematics", "Inverse kinematics equations determine the required joint positions for robotic end effectors."),
+            ("actuator torque feedback control system", "Torque sensors and closed loop feedback loops stabilize high speed robotic joints."),
+            ("robotic trajectory path motion planning", "Polynomial spline interpolation produces smooth collision-free motion paths across waypoints."),
+            ("servo motor PID controller tuning dynamics", "Proportional integral derivative parameters minimize steady state error in robotic arms."),
+            ("multi-axis manipulator forward kinematics", "Denavit-Hartenberg parameters describe coordinate transformations along articulating serial links."),
         ]
 
         conn = get_connection()
         for idx, (p, r) in enumerate(related_bubbles, 1):
-            # Assert similarity precondition with S1 using the engine's vectorizer
+            # Assert similarity precondition with S1 using neural embeddings
             active_bubbles = get_all_active_bubbles(conn)
             active_corpus = [get_bubble_search_text(b) for b in active_bubbles]
             kw_rel = extract_keywords(p + " " + r, active_corpus)
@@ -309,11 +307,10 @@ def test_auto_promotion_and_core_protection(temp_db):
             s1_b = get_bubble_by_id(conn, s1_id)
             s1_text = get_bubble_search_text(s1_b)
 
-            vec = fit_shared_vectorizer(active_corpus + [t_rel])
-            sim = compute_similarity(vec, t_rel, s1_text)
+            sim = compute_similarity(t_rel, s1_text)
             assert (
                 config.LINK_SIMILARITY_MIN <= sim <= config.LINK_SIMILARITY_MAX
-            ), f"Precondition failed on call {idx}: similarity {sim} not in [0.35, 0.80]"
+            ), f"Precondition failed on call {idx}: similarity {sim} not in [{config.LINK_SIMILARITY_MIN}, {config.LINK_SIMILARITY_MAX}]"
 
             res = client.post("/save_memory", json={"prompt": p, "response": r})
             assert res.status_code == 200
@@ -328,7 +325,7 @@ def test_auto_promotion_and_core_protection(temp_db):
         assert s1_record.node_type == "CORE"
         assert s1_record.incoming_links >= 5
 
-        # Now test CORE protection: ingest identical duplicate with similarity > 0.80
+        # Now test CORE protection: ingest identical duplicate with similarity > 0.88
         # For a CORE bubble, it must NOT be archived, and incoming_links must increment
         dup_prompt = s1_prompt
         dup_resp = s1_resp
@@ -340,8 +337,7 @@ def test_auto_promotion_and_core_protection(temp_db):
         t_dup = sum_dup + " " + " ".join(kw_dup)
         s1_text = get_bubble_search_text(s1_record)
 
-        vec_dup = fit_shared_vectorizer(active_corpus + [t_dup])
-        sim_dup = compute_similarity(vec_dup, t_dup, s1_text)
+        sim_dup = compute_similarity(t_dup, s1_text)
         assert sim_dup > config.SUPERSEDE_THRESHOLD
 
         res_dup = client.post("/save_memory", json={"prompt": dup_prompt, "response": dup_resp})
@@ -374,9 +370,8 @@ def test_supersede_and_archive_undo(temp_db):
         sum1 = extract_extractive_summary(p1, r1)
         t1 = sum1 + " " + " ".join(kw1)
 
-        vec = fit_shared_vectorizer([t1, t1])
-        sim = compute_similarity(vec, t1, t1)
-        assert sim > config.SUPERSEDE_THRESHOLD, f"Precondition failed: similarity {sim} not > 0.80"
+        sim = compute_similarity(t1, t1)
+        assert sim > config.SUPERSEDE_THRESHOLD, f"Precondition failed: similarity {sim} not > {config.SUPERSEDE_THRESHOLD}"
 
         res2 = client.post("/save_memory", json={"prompt": p2, "response": r2})
         s2_id = res2.json()["bubble_id"]
@@ -456,3 +451,36 @@ def test_edge_cases_and_auth(temp_db, monkeypatch):
             json={"query": "test query", "max_tokens": 1500},
         )
         assert auth_res.status_code == 200
+
+
+# 9. Embedding layer unit tests
+def test_embed_texts_unit():
+    texts = [
+        "Quantum physics entanglement and superposition principles",
+        "Subatomic particle spin states and Bell inequalities",
+        "Artisanal sourdough bread sourdough starter fermentation",
+    ]
+    embs = embed_texts(texts)
+    # Check shape (n, 384)
+    assert embs.shape == (3, 384)
+    assert embs.dtype == np.float32
+
+    # Check unit normalization: L2 norm of each embedding vector should be ~1.0
+    norms = np.linalg.norm(embs, axis=1)
+    assert np.allclose(norms, 1.0, atol=1e-4)
+
+    # Check empty input returns (0, 384) float32 array
+    empty_embs = embed_texts([])
+    assert empty_embs.shape == (0, 384)
+    assert empty_embs.dtype == np.float32
+
+    # Check related pair similarity > unrelated pair similarity
+    sim_related = compute_similarity(texts[0], texts[1])
+    sim_unrelated = compute_similarity(texts[0], texts[2])
+    assert sim_related > sim_unrelated
+
+
+def test_model_singleton():
+    m1 = _get_model()
+    m2 = _get_model()
+    assert m1 is m2
